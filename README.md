@@ -8,7 +8,6 @@ Aplicación web full-stack para la captura, validación y análisis estadístico
 
 * **Frontend (Producción - Vercel):** [https://nexxus-jet.vercel.app/](https://nexxus-jet.vercel.app/)
 * **Backend API (Producción - Render):** [https://sistema-limpieza-urbana.onrender.com/](https://sistema-limpieza-urbana.onrender.com/)
-* **Documentación Interactiva API (Swagger):** [https://sistema-limpieza-urbana.onrender.com/swagger](https://sistema-limpieza-urbana.onrender.com/swagger)
 
 > **Nota:** El backend está alojado en el plan gratuito de Render; si permanece inactivo por más de 15 minutos, la primera petición puede tardar entre 45 y 60 segundos mientras el contenedor vuelve a activarse.
 
