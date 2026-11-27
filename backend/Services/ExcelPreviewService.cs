@@ -1,5 +1,6 @@
 using System.Data;
 using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 using ExcelDataReader;
 using LimpiezaUrbana.API.DTOs;
@@ -13,11 +14,20 @@ public interface IExcelPreviewService
 
 public sealed class ExcelPreviewService : IExcelPreviewService
 {
+    private const decimal FactorDefault = 1650m / 14m; // 117.85714285714286 kg/m3 exacto del Excel
     private readonly decimal _factorKgPorM3;
+
+    private static readonly Dictionary<string, int> MesesEs = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["enero"] = 1, ["febrero"] = 2, ["marzo"] = 3, ["abril"] = 4,
+        ["mayo"] = 5, ["junio"] = 6, ["julio"] = 7, ["agosto"] = 8,
+        ["septiembre"] = 9, ["setiembre"] = 9, ["octubre"] = 10,
+        ["noviembre"] = 11, ["diciembre"] = 12
+    };
 
     public ExcelPreviewService(IConfiguration configuration)
     {
-        _factorKgPorM3 = configuration.GetValue<decimal?>("Excel:FactorKgPorM3") ?? 1000m;
+        _factorKgPorM3 = configuration.GetValue<decimal?>("Excel:FactorKgPorM3") ?? FactorDefault;
     }
 
     public PrevisualizarReporteResponse ProcesarArchivo(Stream archivoStream, string nombreArchivo)
@@ -25,7 +35,7 @@ public sealed class ExcelPreviewService : IExcelPreviewService
         var response = new PrevisualizarReporteResponse
         {
             NombreArchivo = nombreArchivo,
-            FactorKgPorM3 = _factorKgPorM3
+            FactorKgPorM3 = Math.Round(_factorKgPorM3, 4)
         };
 
         using var reader = ExcelReaderFactory.CreateReader(archivoStream);
@@ -37,8 +47,18 @@ public sealed class ExcelPreviewService : IExcelPreviewService
             }
         });
 
+        var (anioLibro, mesLibro) = DetectarAnioMesLibro(dataSet);
+        response.Mes = mesLibro;
+        response.Anio = anioLibro;
+
         foreach (DataTable table in dataSet.Tables)
         {
+            // Ignorar hojas irrelevantes al final (ej. "Mensual", "Tablas") o cualquier hoja que no sea día del mes (1..31)
+            if (!int.TryParse(table.TableName.Trim(), out var diaHoja) || diaHoja is < 1 or > 31)
+            {
+                continue;
+            }
+
             var headerRowIndex = EncontrarFilaEncabezados(table);
             if (headerRowIndex < 0)
             {
@@ -47,10 +67,15 @@ public sealed class ExcelPreviewService : IExcelPreviewService
             }
 
             response.TotalHojasLeidas++;
-            var columnas = MapearColumnas(table.Rows[headerRowIndex]);
-            var fechaHoja = IntentarObtenerFechaDeHoja(table.TableName);
+            var columnas = MapearColumnas(table, headerRowIndex);
+            var fechaHoja = ExtraerFechaDeHoja(table, headerRowIndex)
+                ?? ConstruirFechaDesdeLibro(anioLibro, mesLibro, diaHoja);
 
-            for (int r = headerRowIndex + 1; r < table.Rows.Count; r++)
+            var dataStartRow = columnas.SubHeaderRows > 0
+                ? headerRowIndex + columnas.SubHeaderRows + 1
+                : headerRowIndex + 1;
+
+            for (int r = dataStartRow; r < table.Rows.Count; r++)
             {
                 var row = table.Rows[r];
                 var ubicacion = ObtenerTexto(row, columnas.UbicacionIndex);
@@ -64,12 +89,20 @@ public sealed class ExcelPreviewService : IExcelPreviewService
                 var cuadrilla = ParsearCuadrilla(ObtenerTexto(row, columnas.CuadrillaIndex));
 
                 var actividades = new List<string>();
-                foreach (var (colIndex, nombreActividad) in columnas.Actividades)
+                foreach (var (colIndex, codigoActividad) in columnas.Actividades)
                 {
                     var valor = ObtenerTexto(row, colIndex);
+                    if (string.IsNullOrWhiteSpace(valor))
+                        continue;
+
                     if (EstaMarcadaActividad(valor))
                     {
-                        actividades.Add(nombreActividad);
+                        actividades.Add(codigoActividad);
+                    }
+                    else if (!actividades.Contains(valor, StringComparer.OrdinalIgnoreCase))
+                    {
+                        // Texto personalizado en celdas combinadas de actividades (ej. "Animal Muerto", "Cacharros")
+                        actividades.Add(valor);
                     }
                 }
 
@@ -89,6 +122,7 @@ public sealed class ExcelPreviewService : IExcelPreviewService
                     Ubicacion = ubicacion,
                     Actividades = actividades,
                     SolicitadoRaw = solicitado,
+                    NumeroOficio = ExtraerNumeroOficio(solicitado),
                     Categoria = ClasificarCategoria(solicitado, ubicacion),
                     Ml = ml,
                     M2 = m2,
@@ -115,7 +149,7 @@ public sealed class ExcelPreviewService : IExcelPreviewService
             }
 
             if (textos.Any(t => t.Contains("ubicacion")) &&
-                (textos.Any(t => t.Contains("solicitado")) || textos.Any(t => t.Contains("cuadrilla"))))
+                (textos.Any(t => t.Contains("solicit")) || textos.Any(t => t.Contains("cuadrilla"))))
             {
                 return i;
             }
@@ -124,16 +158,17 @@ public sealed class ExcelPreviewService : IExcelPreviewService
         return -1;
     }
 
-    private static ColumnMap MapearColumnas(DataRow headerRow)
+    private static ColumnMap MapearColumnas(DataTable table, int headerRowIndex)
     {
         var map = new ColumnMap();
-        var colCount = headerRow.Table.Columns.Count;
+        var headerRow = table.Rows[headerRowIndex];
+        var colCount = table.Columns.Count;
+        var kgIndex = -1;
 
         for (int c = 0; c < colCount; c++)
         {
             var rawHeader = headerRow[c]?.ToString()?.Trim() ?? string.Empty;
             var norm = Normalizar(rawHeader);
-
             if (string.IsNullOrWhiteSpace(norm))
                 continue;
 
@@ -145,35 +180,136 @@ public sealed class ExcelPreviewService : IExcelPreviewService
             {
                 map.UbicacionIndex = c;
             }
-            else if (map.SolicitadoIndex < 0 && norm.Contains("solicitado"))
+            else if (map.SolicitadoIndex < 0 && norm.Contains("solicit"))
             {
                 map.SolicitadoIndex = c;
             }
-            else if (map.MlIndex < 0 && (norm == "ml" || norm.Contains("metros lineales")))
+            else if (map.MlIndex < 0 && (norm == "ml" || norm.Contains("(ml)") || norm.Contains("barrido manual") || norm.Contains("metros lineales")))
             {
                 map.MlIndex = c;
             }
-            else if (map.M2Index < 0 && (norm == "m2" || norm.Contains("metros cuadrados")))
+            else if (map.M2Index < 0 && (norm == "m2" || norm.Contains("area") || norm.Contains("m²") || norm.Contains("metros cuadrados")))
             {
                 map.M2Index = c;
             }
-            else if (map.M3Index < 0 && (norm == "m3" || norm.Contains("metros cubicos")))
+            else if (map.M3Index < 0 && (norm == "m3" || norm.Contains("m³") || norm.Contains("metros cubicos")))
             {
                 map.M3Index = c;
             }
-            else if (norm == "kg" || norm.Contains("kilogramo"))
+            else if (kgIndex < 0 && (norm == "kg" || norm.Contains("peso") || norm.Contains("kilogramo")))
             {
-                // Ignorar columna kg de fórmula del Excel por regla de negocio
-                continue;
+                // Ignorar columna kg de fórmula del Excel por regla de negocio; además marca el fin de la tabla principal
+                kgIndex = c;
+                break;
             }
-            else
+        }
+
+        // Detectar columnas de actividades entre Ubicaciones y Solicito (formato con subencabezados en 2 filas: B+M=BM, C+Z=CZ, etc.)
+        if (map.UbicacionIndex >= 0 && map.SolicitadoIndex > map.UbicacionIndex + 1)
+        {
+            var hasRow1 = headerRowIndex + 1 < table.Rows.Count;
+            var hasRow2 = headerRowIndex + 2 < table.Rows.Count;
+            var sub1 = hasRow1 ? table.Rows[headerRowIndex + 1] : null;
+            var sub2 = hasRow2 ? table.Rows[headerRowIndex + 2] : null;
+
+            for (int c = map.UbicacionIndex + 1; c < map.SolicitadoIndex; c++)
             {
-                // Columnas restantes entre ubicación/solicitado/cantidades corresponden a actividades
-                map.Actividades.Add((c, rawHeader));
+                var p1 = sub1?[c]?.ToString()?.Trim() ?? string.Empty;
+                var p2 = sub2?[c]?.ToString()?.Trim() ?? string.Empty;
+                var codigo = $"{p1}{p2}".Trim();
+
+                if (!string.IsNullOrWhiteSpace(codigo) && codigo.Length <= 4 && codigo.All(char.IsLetter))
+                {
+                    map.Actividades.Add((c, codigo.ToUpperInvariant()));
+                    map.SubHeaderRows = 2;
+                }
+                else
+                {
+                    var fallback = headerRow[c]?.ToString()?.Trim();
+                    if (!string.IsNullOrWhiteSpace(fallback))
+                    {
+                        map.Actividades.Add((c, fallback));
+                    }
+                }
             }
         }
 
         return map;
+    }
+
+    private static (int? Anio, int? Mes) DetectarAnioMesLibro(DataSet dataSet)
+    {
+        foreach (DataTable table in dataSet.Tables)
+        {
+            if (!int.TryParse(table.TableName.Trim(), out _))
+                continue;
+
+            var headerIdx = EncontrarFilaEncabezados(table);
+            if (headerIdx < 0) continue;
+
+            var fecha = ExtraerFechaDeHoja(table, headerIdx);
+            if (fecha.HasValue)
+            {
+                return (fecha.Value.Year, fecha.Value.Month);
+            }
+        }
+
+        return (null, null);
+    }
+
+    private static DateOnly? ExtraerFechaDeHoja(DataTable table, int headerRowIndex)
+    {
+        var maxRow = Math.Min(headerRowIndex, table.Rows.Count);
+        for (int r = 0; r < maxRow; r++)
+        {
+            for (int c = 0; c < table.Columns.Count; c++)
+            {
+                var raw = table.Rows[r][c]?.ToString()?.Trim();
+                if (string.IsNullOrWhiteSpace(raw) || !raw.Contains("Fecha", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                // Ejemplo: "Fecha: 01 Agosto 2026"
+                var match = Regex.Match(raw, @"(\d{1,2})\s+([A-Za-záéíóúÁÉÍÓÚñÑ]+)\s+(\d{4})");
+                if (match.Success &&
+                    int.TryParse(match.Groups[1].Value, out var dia) &&
+                    MesesEs.TryGetValue(Normalizar(match.Groups[2].Value), out var mes) &&
+                    int.TryParse(match.Groups[3].Value, out var anio))
+                {
+                    if (dia >= 1 && dia <= DateTime.DaysInMonth(anio, mes))
+                    {
+                        return new DateOnly(anio, mes, dia);
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static DateOnly? ConstruirFechaDesdeLibro(int? anio, int? mes, int dia)
+    {
+        if (!anio.HasValue || !mes.HasValue)
+            return null;
+
+        if (dia < 1 || dia > DateTime.DaysInMonth(anio.Value, mes.Value))
+            return null;
+
+        return new DateOnly(anio.Value, mes.Value, dia);
+    }
+
+    private static string? ExtraerNumeroOficio(string solicitado)
+    {
+        if (string.IsNullOrWhiteSpace(solicitado))
+            return null;
+
+        // Ejemplos: "CIGA: 519604", "CIGA: STTGI2", "Oficio: OP-16308/2026"
+        var match = Regex.Match(solicitado, @"(?:CIGA|OFICIO)\s*[:#\-]?\s*([A-Za-z0-9\-\/]+)", RegexOptions.IgnoreCase);
+        if (match.Success && !string.IsNullOrWhiteSpace(match.Groups[1].Value))
+        {
+            return match.Groups[1].Value.Trim();
+        }
+
+        return null;
     }
 
     private static string ClasificarCategoria(string solicitado, string ubicacion)
@@ -235,16 +371,6 @@ public sealed class ExcelPreviewService : IExcelPreviewService
             : 0m;
     }
 
-    private static DateOnly? IntentarObtenerFechaDeHoja(string nombreHoja)
-    {
-        if (DateOnly.TryParse(nombreHoja.Trim(), new CultureInfo("es-MX"), DateTimeStyles.None, out var fecha))
-        {
-            return fecha;
-        }
-
-        return null;
-    }
-
     private static bool EsFilaTotal(string ubicacion)
     {
         var norm = Normalizar(ubicacion);
@@ -264,8 +390,8 @@ public sealed class ExcelPreviewService : IExcelPreviewService
         if (string.IsNullOrWhiteSpace(texto))
             return string.Empty;
 
-        var formD = texto.Trim().ToLowerInvariant().Normalize(System.Text.NormalizationForm.FormD);
-        var sb = new System.Text.StringBuilder(formD.Length);
+        var formD = texto.Trim().ToLowerInvariant().Normalize(NormalizationForm.FormD);
+        var sb = new StringBuilder(formD.Length);
         foreach (var ch in formD)
         {
             if (CharUnicodeInfo.GetUnicodeCategory(ch) != UnicodeCategory.NonSpacingMark)
@@ -274,7 +400,7 @@ public sealed class ExcelPreviewService : IExcelPreviewService
             }
         }
 
-        return sb.ToString().Normalize(System.Text.NormalizationForm.FormC);
+        return sb.ToString().Normalize(NormalizationForm.FormC);
     }
 
     private sealed class ColumnMap
@@ -285,6 +411,7 @@ public sealed class ExcelPreviewService : IExcelPreviewService
         public int MlIndex { get; set; } = -1;
         public int M2Index { get; set; } = -1;
         public int M3Index { get; set; } = -1;
-        public List<(int Index, string Nombre)> Actividades { get; } = new();
+        public int SubHeaderRows { get; set; }
+        public List<(int Index, string Codigo)> Actividades { get; } = new();
     }
 }

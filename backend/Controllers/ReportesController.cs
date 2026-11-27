@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using LimpiezaUrbana.API.DTOs;
 using LimpiezaUrbana.API.Services;
 using Microsoft.AspNetCore.Authorization;
@@ -10,10 +11,14 @@ namespace LimpiezaUrbana.API.Controllers;
 public sealed class ReportesController : ControllerBase
 {
     private readonly IExcelPreviewService _excelPreviewService;
+    private readonly IReportesPersistenceService _persistenceService;
 
-    public ReportesController(IExcelPreviewService excelPreviewService)
+    public ReportesController(
+        IExcelPreviewService excelPreviewService,
+        IReportesPersistenceService persistenceService)
     {
         _excelPreviewService = excelPreviewService;
+        _persistenceService = persistenceService;
     }
 
     [HttpPost("previsualizar")]
@@ -35,5 +40,27 @@ public sealed class ReportesController : ControllerBase
         using var stream = archivo.OpenReadStream();
         var resultado = _excelPreviewService.ProcesarArchivo(stream, archivo.FileName);
         return Ok(resultado);
+    }
+
+    [HttpPost("confirmar")]
+    [Authorize(Roles = "Capturador,Desarrollador")]
+    public async Task<ActionResult<ConfirmarReporteResponse>> Confirmar([FromBody] ConfirmarReporteRequest request)
+    {
+        var userIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!int.TryParse(userIdClaim, out var usuarioId))
+        {
+            return Unauthorized(new { mensaje = "Token inválido: no se encontró el identificador de usuario." });
+        }
+
+        var resultado = await _persistenceService.ConfirmarAsync(request, usuarioId);
+        return Ok(resultado);
+    }
+
+    [HttpGet("cargas")]
+    [Authorize(Roles = "Capturador,Coordinador,Desarrollador")]
+    public async Task<ActionResult<IEnumerable<CargaMensualDto>>> ListarCargas()
+    {
+        var cargas = await _persistenceService.ListarCargasAsync();
+        return Ok(cargas);
     }
 }

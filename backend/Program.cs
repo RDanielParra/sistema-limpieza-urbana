@@ -30,6 +30,8 @@ builder.Services.AddCors(options =>
 builder.Services.AddSingleton<IDbConnectionFactory, NpgsqlConnectionFactory>();
 builder.Services.AddScoped<IJwtService, JwtService>();
 builder.Services.AddScoped<IExcelPreviewService, ExcelPreviewService>();
+builder.Services.AddScoped<IReportesPersistenceService, ReportesPersistenceService>();
+builder.Services.AddScoped<IEstadisticasService, EstadisticasService>();
 
 var jwtKey = builder.Configuration["Jwt:Key"]
     ?? throw new InvalidOperationException("No se encontró 'Jwt:Key' en la configuración.");

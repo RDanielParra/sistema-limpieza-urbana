@@ -66,12 +66,13 @@ CREATE TABLE IF NOT EXISTS catalogo_actividades (
 );
 
 INSERT INTO catalogo_actividades (clave, nombre) VALUES
-    ('PAPELEO', 'Papeleo'),
-    ('BARRIDO_MANUAL', 'Barrido Manual'),
-    ('DESHIERBE', 'Deshierbe'),
-    ('DESAZOLVE', 'Desazolve'),
-    ('DESCACHARRIZACION', 'Descacharrización'),
-    ('RECOLECCION', 'Recolección / Levantamiento')
+    ('BM', 'Barrido Manual (BM)'),
+    ('CZ', 'Chapoleo / Desmalezado (CZ)'),
+    ('PB', 'Papeleo / Barrido (PB)'),
+    ('LB', 'Limpieza de Bordo / Basura (LB)'),
+    ('LE', 'Levantamiento de Escombro (LE)'),
+    ('LT', 'Levantamiento de Tierra (LT)'),
+    ('LR', 'Levantamiento de Rama (LR)')
 ON CONFLICT (clave) DO NOTHING;
 
 -- ----------------------------------------------------------------------------
@@ -93,6 +94,7 @@ CREATE TABLE IF NOT EXISTS registros_operativos (
     cuadrilla_id    INTEGER NULL REFERENCES cuadrillas(id) ON DELETE SET NULL,
     ubicacion       TEXT NOT NULL,
     solicitado_raw  VARCHAR(200) NOT NULL,
+    numero_oficio   VARCHAR(100) NULL,
     categoria_id    INTEGER NOT NULL REFERENCES categorias(id) ON DELETE RESTRICT,
     ml              NUMERIC(12, 2) NOT NULL DEFAULT 0 CHECK (ml >= 0),
     m2              NUMERIC(12, 2) NOT NULL DEFAULT 0 CHECK (m2 >= 0),
@@ -106,6 +108,9 @@ CREATE TABLE IF NOT EXISTS registro_actividades (
     actividad_id    INTEGER NOT NULL REFERENCES catalogo_actividades(id) ON DELETE RESTRICT,
     PRIMARY KEY (registro_id, actividad_id)
 );
+
+-- Asegurar columna numero_oficio en bases ya creadas
+ALTER TABLE registros_operativos ADD COLUMN IF NOT EXISTS numero_oficio VARCHAR(100) NULL;
 
 -- ----------------------------------------------------------------------------
 -- 4. Índices para consultas estadísticas
